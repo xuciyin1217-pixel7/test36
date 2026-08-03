@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子化圖片特效 (Particle Image)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* 隱藏捲軸，全螢幕畫布 */
+            background-color: #050505; /* 深色背景更能凸顯粒子 */
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        
+        /* 隱藏預設的上傳按鈕外觀 */
+        input[type="file"]::file-selector-button {
+            display: none;
+        }
+    </style>
+</head>
+<body class="relative w-screen h-screen">
+
+    <!-- 左上角控制面板 (玻璃擬真效果) -->
+    <div class="absolute top-6 left-6 z-10 bg-slate-900/60 backdrop-blur-md border border-slate-700 shadow-2xl rounded-2xl p-6 w-80">
+        <div class="flex items-center space-x-3 mb-4">
+            <div class="w-10 h-10 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-xl shadow-[0_0_15px_rgba(6,182,212,0.5)]">
+                <i class="fa-solid fa-meteor"></i>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold text-white tracking-wide">粒子圖片特效</h1>
+                <p class="text-xs text-cyan-400/80">互動式像素碎裂模擬</p>
+            </div>
+        </div>
+        
+        <p class="text-sm text-slate-300 mb-5 leading-relaxed">
+            上傳一張圖片，並將滑鼠游標移至圖片上方，即可觀看影像碎裂成無數粒子的物理互動特效。
+        </p>
+
+        <!-- 新增粒子密度滑桿 -->
+        <div class="mb-5">
+            <div class="flex justify-between text-xs text-slate-300 mb-2">
+                <label for="densitySlider">粒子密度 (解析度)</label>
+                <span id="densityVal" class="text-cyan-400 font-mono">標準</span>
+            </div>
+            <input type="range" id="densitySlider" min="1" max="9" value="7" class="w-full accent-cyan-500 bg-slate-700 h-1.5 rounded-lg cursor-pointer">
+            <p class="text-[10px] text-slate-500 mt-1">調高可顯示更多細節，但可能會影響效能</p>
+        </div>
+
+        <!-- 自訂上傳按鈕區塊 -->
+        <label class="relative block w-full py-3 px-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium text-sm text-center rounded-xl cursor-pointer transition-all shadow-lg shadow-cyan-900/50 hover:shadow-cyan-500/30 active:scale-[0.98]">
+            <i class="fa-solid fa-image mr-2"></i> 選擇圖片並轉換
+            <input type="file" id="imageInput" accept="image/png, image/jpeg, image/webp" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+        </label>
+        
+        <div class="mt-4 pt-4 border-t border-slate-700/50 flex justify-between items-center text-xs">
+            <span class="text-slate-400">目前粒子數量：</span>
+            <span id="particleCount" class="font-mono font-bold text-cyan-400">0</span>
+        </div>
+    </div>
+
+    <!-- 粒子特效主畫布 -->
+    <canvas id="canvas" class="block w-full h-full cursor-crosshair"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const imageInput = document.getElementById('imageInput');
+        const particleCountEl = document.getElementById('particleCount');
+        const densitySlider = document.getElementById('densitySlider');
+        const densityVal = document.getElementById('densityVal');
+
+        let particles = [];
+        let mouse = { x: -1000, y: -1000, radius: 80 }; // 初始將滑鼠設定在畫面外
+        let animationFrameId;
+        let currentImgSource = 'welcome'; // 記錄當前的圖片來源，以便切換密度時重新生成
+
+        // 監聽密度滑桿文字變化 (拖動中即時反應)
+        densitySlider.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            let text = "標準";
+            if (val <= 3) text = "低 (流暢)";
+            else if (val >= 8) text = "高 (精細)";
+            densityVal.innerText = text;
+        });
+
+        // 監聽密度滑桿設定完成 (放開滑桿後才重新渲染粒子，避免卡頓)
+        densitySlider.addEventListener('change', () => {
+            if (currentImgSource === 'welcome') {
+                initWelcomeText();
+            } else if (currentImgSource instanceof Image) {
+                convertImageToParticles(currentImgSource);
+            }
+        });
+
+        // 設定畫布尺寸符合視窗大小
+        function resizeCanvas() {
+            // 避免預覽環境中視窗寬高尚未初始化(為0)的問題
+            canvas.width = Math.max(1, window.innerWidth || 800);
+            canvas.height = Math.max(1, window.innerHeight || 600);
+        }
+        window.addEventListener('resize', () => {
+            resizeCanvas();
+            // 若視窗改變，可考慮重繪，但為了簡化，此處僅調整畫布大小
+            // 在實際應用中，通常會重新計算圖片的置中位置
+        });
+        resizeCanvas();
+
+        // 監聽滑鼠移動
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = e.x;
+            mouse.y = e.y;
+        });
+
+        // 支援觸控螢幕的滑動
+        window.addEventListener('touchmove', (e) => {
+            mouse.x = e.touches[0].clientX;
+            mouse.y = e.touches[0].clientY;
+        });
+
+        // 游標離開視窗時移除排斥力
+        window.addEventListener('mouseleave', () => {
+            mouse.x = -1000;
+            mouse.y = -1000;
+        });
+        window.addEventListener('touchend', () => {
+            mouse.x = -1000;
+            mouse.y = -1000;
+        });
+
+        // 粒子物件類別
+        class Particle {
+            constructor(x, y, color) {
+                // 起始位置設為隨機亂數，營造一開始從四面八方聚集進來的效果
+                this.x = Math.random() * canvas.width;
+                this.y = Math.random() * canvas.height;
+                
+                // 粒子的目標歸宿位置 (原始圖片的像素位置)
+                this.originX = x;
+                this.originY = y;
+                
+                this.color = color;
+                
+                // 每個粒子大小有些微差異
+                this.size = Math.random() * 2 + 1.5; 
+                
+                // 速度
+                this.vx = 0;
+                this.vy = 0;
+                
+                // 物理參數：回彈力 (ease) 與摩擦力 (friction) 
+                // 讓每個粒子有些微不同的移動手感，顯得更自然
+                this.ease = Math.random() * 0.04 + 0.02; 
+                this.friction = Math.random() * 0.05 + 0.85;
+                
+                // 排斥力量乘數
+                this.repelForce = Math.random() * 4 + 2;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size / 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            update() {
+                // 1. 計算滑鼠排斥力
+                let dx = mouse.x - this.x;
+                let dy = mouse.y - this.y;
+                let distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < mouse.radius) {
+                    // 滑鼠越靠近，排斥力越強
+                    let force = (mouse.radius - distance) / mouse.radius;
+                    let angle = Math.atan2(dy, dx);
+                    
+                    // 推開粒子 (給予反方向的速度)
+                    this.vx -= Math.cos(angle) * force * this.repelForce;
+                    this.vy -= Math.sin(angle) * force * this.repelForce;
+                }
+
+                // 2. 計算回歸原位的引力 (彈簧效果)
+                this.vx += (this.originX - this.x) * this.ease;
+                this.vy += (this.originY - this.y) * this.ease;
+
+                // 3. 套用摩擦力使其漸緩
+                this.vx *= this.friction;
+                this.vy *= this.friction;
+
+                // 4. 更新實際位置
+                this.x += this.vx;
+                this.y += this.vy;
+            }
+        }
+
+        // 將圖片轉換為粒子陣列
+        function convertImageToParticles(img) {
+            particles = []; // 清空舊粒子
+            
+            // 效能控制：限制圖片分析的最大尺寸，防止產生數百萬個粒子導致瀏覽器崩潰
+            const MAX_DIMENSION = 500;
+            let scale = 1;
+            
+            if (img.width > MAX_DIMENSION || img.height > MAX_DIMENSION) {
+                scale = Math.min(MAX_DIMENSION / img.width, MAX_DIMENSION / img.height);
+            }
+            
+            const drawWidth = img.width * scale;
+            const drawHeight = img.height * scale;
+            
+            // 計算置中座標
+            const offsetX = (canvas.width - drawWidth) / 2;
+            const offsetY = (canvas.height - drawHeight) / 2;
+
+            // 建立一個暫存的離屏 Canvas 來擷取像素數據
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+            tempCanvas.width = drawWidth;
+            tempCanvas.height = drawHeight;
+            
+            // 將縮放後的圖片畫在暫存 Canvas 上
+            tempCtx.drawImage(img, 0, 0, drawWidth, drawHeight);
+            
+            // 讀取像素數據
+            const imgData = tempCtx.getImageData(0, 0, drawWidth, drawHeight);
+            const data = imgData.data;
+
+            // 掃描間距 (Gap) - 改由滑桿動態決定，數值越大密度越高 (間距越小)
+            const gap = Math.max(2, 11 - parseInt(densitySlider.value)); 
+
+            for (let y = 0; y < drawHeight; y += gap) {
+                for (let x = 0; x < drawWidth; x += gap) {
+                    const index = (y * Math.floor(drawWidth) + x) * 4;
+                    
+                    const r = data[index];
+                    const g = data[index + 1];
+                    const b = data[index + 2];
+                    const alpha = data[index + 3];
+
+                    // 只針對不透明的像素產生粒子，並過濾掉純黑或近乎純黑的像素以節省效能
+                    if (alpha > 128 && (r > 10 || g > 10 || b > 10)) {
+                        const color = `rgb(${r}, ${g}, ${b})`;
+                        // 將粒子的目標位置加上 offsetX/Y 使其在主畫布置中
+                        particles.push(new Particle(offsetX + x, offsetY + y, color));
+                    }
+                }
+            }
+
+            // 更新 UI 上的數量
+            particleCountEl.innerText = particles.length.toLocaleString();
+            
+            // 取消舊的動畫迴圈並啟動新的
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            animate();
+        }
+
+        // 處理圖片上傳
+        imageInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    currentImgSource = img; // 更新當前圖片來源
+                    convertImageToParticles(img);
+                }
+                img.src = event.target.result;
+            }
+            reader.readAsDataURL(file);
+            
+            // 清空 value 允許重新上傳相同圖片
+            imageInput.value = '';
+        });
+
+        // 動畫迴圈
+        function animate() {
+            // 使用帶有透明度的黑色填滿畫布，製造出移動時的殘影拖曳感 (Trailing effect)
+            ctx.fillStyle = 'rgba(5, 5, 5, 0.4)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 更新與繪製所有粒子
+            for (let i = 0; i < particles.length; i++) {
+                particles[i].update();
+                particles[i].draw();
+            }
+
+            animationFrameId = requestAnimationFrame(animate);
+        }
+
+        // 初始畫面：繪製一段歡迎文字的粒子效果
+        function initWelcomeText() {
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+            
+            // 避免視窗尚未渲染完成導致寬高為 0 而報錯
+            const startWidth = Math.max(1, window.innerWidth || 800);
+            const startHeight = Math.max(1, window.innerHeight || 600);
+            tempCanvas.width = startWidth;
+            tempCanvas.height = startHeight;
+            
+            tempCtx.fillStyle = '#06b6d4'; // Cyan-500
+            tempCtx.font = 'bold 8vw system-ui, sans-serif';
+            tempCtx.textAlign = 'center';
+            tempCtx.textBaseline = 'middle';
+            tempCtx.fillText('UPLOAD IMAGE', tempCanvas.width / 2, tempCanvas.height / 2);
+            
+            const imgData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+            const data = imgData.data;
+            
+            // 根據滑桿數值決定文字粒子的密度
+            const gap = Math.max(2, 11 - parseInt(densitySlider.value));
+            
+            particles = [];
+            for (let y = 0; y < tempCanvas.height; y += gap) {
+                for (let x = 0; x < tempCanvas.width; x += gap) {
+                    const index = (y * tempCanvas.width + x) * 4;
+                    const alpha = data[index + 3];
+                    if (alpha > 128) {
+                        particles.push(new Particle(x, y, '#06b6d4'));
+                    }
+                }
+            }
+            particleCountEl.innerText = particles.length.toLocaleString();
+            animate();
+        }
+
+        // 啟動預設特效
+        initWelcomeText();
+
+    </script>
+</body>
+</html>
